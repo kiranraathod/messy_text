@@ -39,72 +39,28 @@ uv run messy-text "After 5 years in development, we finally started shooting tod
 ## CLI Usage
 
 ```bash
-# Single text
+# Single text argument
 uv run messy-text "The screenplay is being rewritten while producers seek financing."
 
 # Pipe from stdin
 echo "Cameras are rolling in Atlanta." | uv run messy-text
-
-# Interactive mode
-uv run messy-text
-
-# Batch mode
-uv run messy-text --batch input.jsonl > output.jsonl
 ```
-
-## Batch Mode
-
-Each line in the batch input should be a JSON object with a `"text"` key. Plain-text lines are also accepted and treated as raw input.
-
-```jsonl
-{"text": "The screenplay is in its fourth draft."}
-{"text": "Principal photography began in Vancouver."}
-Grilled salmon with lemon butter sauce.
-```
-
-Successful rows keep the classification payload:
-
-```jsonl
-{"line": 1, "input": "The screenplay is in its fourth draft.", "reasoning": "...", "stage": "DEVELOPMENT", "confidence": 0.9}
-{"line": 2, "input": "Principal photography began in Vancouver.", "reasoning": "...", "stage": "PRODUCTION", "confidence": 0.95}
-```
-
-Operational failures are emitted explicitly instead of being misreported as `UNCLASSIFIABLE`:
-
-```jsonl
-{"line": 3, "input": "An ambiguous project update", "error": "GROQ_API_KEY environment variable is not set.", "error_type": "configuration_error"}
-```
-
-Supported `error_type` values are `configuration_error`, `provider_error`,
-`response_format_error`, and `input_validation_error`.
 
 ## Architecture
 
-```text
-classify(text)
-    |
-    |- empty input -> UNCLASSIFIABLE
-    |- exact phrase fast-path -> direct result
-    \- LLM adapter -> Groq JSON classification
-```
+The system is a pure, minimalist wrapper around the Groq API enforcing a strict JSON schema via Pydantic. It consists of only four files:
 
-- The regex fast-path only handles a few exact phrases such as `principal photography` and `officially greenlit`.
-- All broader policy and edge-case decisions live in the LLM prompt.
-- Provider, configuration, and response-format failures are surfaced as explicit operational errors in the CLI.
+- `__main__.py`: Minimal CLI entrypoint supporting stdin or arguments.
+- `classifier.py`: The orchestrator handling the system prompt and API execution.
+- `models.py`: Pydantic models for strict output validation.
+- `__init__.py`: Version export.
 
 ## Configuration
 
+The application is configured entirely via environment variables.
+
 | Env Variable | Default | Description |
 |---|---|---|
-| `GROQ_API_KEY` | *(required for ambiguous text)* | Groq API key |
-| `MESSY_TEXT_MODEL` | `meta-llama/llama-4-scout-17b-16e-instruct` | Model override |
-| `MESSY_TEXT_CONFIDENCE_THRESHOLD` | `0.5` | Confidence floor below which LLM results become `UNCLASSIFIABLE` |
-| `MESSY_TEXT_MAX_INPUT_CHARS` | `2000` | Maximum input length before classification rejects the record |
-| `MESSY_TEXT_BATCH_WORKERS` | `4` | Number of batch worker threads |
-
-## Tests
-
-```bash
-uv run pytest -v
-uv run pytest --cov
-```
+| `GROQ_API_KEY` | *(required)* | Groq API key for LLM requests |
+| `MESSY_TEXT_MODEL` | `meta-llama/llama-4-scout-17b-16e-instruct` | LLM model used for classification |
+| `MESSY_TEXT_MAX_INPUT_CHARS` | `2000` | Maximum input length before classification is rejected |

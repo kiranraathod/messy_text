@@ -47,7 +47,7 @@ def classify(text: str) -> ClassificationResult:
     try:
         max_chars = int(os.environ.get("MESSY_TEXT_MAX_INPUT_CHARS", "2000"))
     except ValueError as exc:
-        raise ValueError(f"Invalid environment configuration: {exc}") from exc
+        raise ValueError(f"Invalid MESSY_TEXT_MAX_INPUT_CHARS: {exc}") from exc
 
     normalized = text.strip()
     if len(normalized) > max_chars:
