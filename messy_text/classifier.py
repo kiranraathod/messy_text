@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import functools
+import os
 
 from groq import Groq
 from pydantic import ValidationError
 
-from messy_text.config import get_config
 from messy_text.models import ClassificationResult, ProductionStage
 
 SYSTEM_PROMPT = """
@@ -30,12 +29,6 @@ Rules:
 """.strip()
 
 
-@functools.lru_cache(maxsize=1)
-def get_client(api_key: str) -> Groq:
-    """Return a cached Groq client instance."""
-    return Groq(api_key=api_key, max_retries=3)
-
-
 def classify(text: str) -> ClassificationResult:
     """Classify messy text into a production stage."""
     if not text or not text.strip():
@@ -45,19 +38,28 @@ def classify(text: str) -> ClassificationResult:
             confidence=1.0,
         )
 
-    config = get_config()
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY environment variable is not set.")
+
+    model = os.environ.get("MESSY_TEXT_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+    
+    try:
+        max_chars = int(os.environ.get("MESSY_TEXT_MAX_INPUT_CHARS", "2000"))
+    except ValueError as exc:
+        raise ValueError(f"Invalid environment configuration: {exc}") from exc
 
     normalized = text.strip()
-    if len(normalized) > config.max_input_chars:
+    if len(normalized) > max_chars:
         raise ValueError(
-            f"Input too long ({len(normalized)} chars). Maximum is {config.max_input_chars}."
+            f"Input too long ({len(normalized)} chars). Maximum is {max_chars}."
         )
 
-    client = get_client(config.api_key)
+    client = Groq(api_key=api_key, max_retries=3)
 
     try:
         response = client.chat.completions.create(
-            model=config.model,
+            model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": normalized},
@@ -75,19 +77,11 @@ def classify(text: str) -> ClassificationResult:
         raise ValueError("Groq response content was empty.")
 
     try:
-        result = ClassificationResult.model_validate_json(raw)
+        return ClassificationResult.model_validate_json(raw)
     except ValidationError as exc:
         message = exc.errors()[0]["msg"]
         raise ValueError(
             f"Groq response did not match the expected schema: {message}"
         ) from exc
 
-    if result.confidence < config.low_confidence_threshold:
-        return ClassificationResult(
-            reasoning=f"Low confidence: {result.reasoning}",
-            stage=ProductionStage.UNCLASSIFIABLE,
-            confidence=result.confidence,
-        )
-
-    return result
 
