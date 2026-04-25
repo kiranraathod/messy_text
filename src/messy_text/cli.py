@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -10,8 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import find_dotenv, load_dotenv
 
 from messy_text.classifier import classify
-
-DEFAULT_BATCH_WORKERS = 4
+from messy_text.config import get_config
 
 
 def main() -> int:
@@ -19,11 +17,7 @@ def main() -> int:
     load_dotenv(find_dotenv(usecwd=True))
 
     try:
-        batch_workers = int(
-            os.environ.get("MESSY_TEXT_BATCH_WORKERS", str(DEFAULT_BATCH_WORKERS))
-        )
-        if batch_workers <= 0:
-            raise ValueError("MESSY_TEXT_BATCH_WORKERS must be greater than 0.")
+        config = get_config()
     except Exception as exc:
         print(json.dumps({"error": str(exc), "error_type": "configuration_error"}))
         return 1
@@ -32,7 +26,7 @@ def main() -> int:
         if len(sys.argv) < 3:
             print("Usage: messy-text --batch <input.jsonl>", file=sys.stderr)
             return 1
-        return _run_batch(sys.argv[2], batch_workers)
+        return _run_batch(sys.argv[2], config.batch_workers)
 
     if len(sys.argv) > 1:
         return _run_single(" ".join(sys.argv[1:]))
@@ -53,7 +47,7 @@ def _run_single(text: str) -> int:
         print(json.dumps({"error": str(exc), "error_type": "operational_error"}))
         return 1
 
-    print(result.to_json())
+    print(result.model_dump_json(indent=2))
     return 0
 
 
@@ -78,56 +72,44 @@ def _run_interactive() -> int:
 def _run_batch(filepath: str, batch_workers: int) -> int:
     had_errors = False
     
-    def process_line(line_num: int, raw_line: str) -> tuple[dict[str, object], bool]:
+    def process_line(line_num: int, raw_line: str) -> dict[str, object]:
         line = raw_line.strip()
         if not line:
-            return ({}, False)
+            return {}
 
         try:
             record = json.loads(line)
-            if isinstance(record, dict):
-                val = record.get("text", "")
-                text = val if isinstance(val, str) else str(val)
-            else:
-                text = line
-        except json.JSONDecodeError:
+            text = record.get("text", line)
+        except Exception:
             text = line
 
         try:
-            result = classify(text)
-            return (
-                {
-                    "line": line_num,
-                    "input": text,
-                    **result.model_dump(mode="json"),
-                },
-                False,
-            )
+            result = classify(str(text))
+            return {
+                "line": line_num,
+                "input": text,
+                **result.model_dump(mode="json"),
+            }
         except Exception as exc:
-            return (
-                {
-                    "line": line_num,
-                    "input": text,
-                    "error": str(exc),
-                    "error_type": "operational_error",
-                },
-                True,
-            )
+            return {
+                "line": line_num,
+                "input": text,
+                "error": str(exc),
+                "error_type": "operational_error",
+            }
 
     with open(filepath, encoding="utf-8") as handle, ThreadPoolExecutor(
         max_workers=batch_workers
     ) as executor:
-        lines = list(enumerate(handle, 1))
-        
         futures = [
             executor.submit(process_line, line_num, raw_line)
-            for line_num, raw_line in lines
+            for line_num, raw_line in enumerate(handle, 1)
         ]
         
         for future in futures:
-            output, has_error = future.result()
+            output = future.result()
             if output:  # Skip empty lines
-                had_errors = had_errors or has_error
+                had_errors = had_errors or "error" in output
                 print(json.dumps(output))
 
     return 1 if had_errors else 0

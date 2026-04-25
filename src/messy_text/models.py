@@ -30,7 +30,3 @@ class ClassificationResult(BaseModel):
         le=1.0,
         description="Confidence score between 0.0 and 1.0.",
     )
-
-    def to_json(self, *, indent: int | None = 2) -> str:
-        """Serialize the result to JSON."""
-        return self.model_dump_json(indent=indent)

@@ -12,7 +12,15 @@ from messy_text.cli import (
     _run_batch,
     main,
 )
+from messy_text.config import get_config
 from messy_text.models import ClassificationResult, ProductionStage
+
+
+@pytest.fixture(autouse=True)
+def reset_config():
+    get_config.cache_clear()
+    yield
+    get_config.cache_clear()
 
 
 def test_batch_uses_raw_text_for_non_jsonl_input(tmp_path, capsys):
