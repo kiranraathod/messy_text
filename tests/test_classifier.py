@@ -190,6 +190,47 @@ class TestLLMClassifier:
         assert call_kwargs["messages"][1]["role"] == "user"
         assert call_kwargs["messages"][1]["content"] == "Some test text."
 
+    @patch("messy_text.classifier._get_groq_client")
+    def test_api_timeout_returns_unclassifiable(self, mock_get_client):
+        """Network timeout should gracefully return UNCLASSIFIABLE, not crash."""
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = TimeoutError("Connection timed out")
+        mock_get_client.return_value = mock_client
+
+        result = _llm_classify("Some text that would normally classify fine.")
+        assert result.stage == ProductionStage.UNCLASSIFIABLE
+        assert result.confidence == 0.0
+        assert "LLM failure" in result.reasoning
+
+    @patch("messy_text.classifier._get_groq_client")
+    def test_malformed_json_returns_unclassifiable(self, mock_get_client):
+        """Malformed LLM output should fallback, not crash json.loads."""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "not valid json at all"
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = _llm_classify("Some text.")
+        assert result.stage == ProductionStage.UNCLASSIFIABLE
+        assert result.confidence == 0.0
+
+    @patch("messy_text.classifier._get_groq_client")
+    def test_missing_keys_uses_defaults(self, mock_get_client):
+        """LLM returning partial JSON should use safe defaults via .get()."""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps({"reasoning": "partial response"})
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = _llm_classify("Some ambiguous text.")
+        assert result.stage == ProductionStage.UNCLASSIFIABLE
+        assert result.confidence == 0.0
+        assert result.reasoning == "partial response"
+
 
 # ===================================================================
 # Full classify() pipeline tests

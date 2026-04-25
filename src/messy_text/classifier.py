@@ -120,29 +120,39 @@ def _llm_classify(text: str) -> ClassificationResult:
     """Send text to Groq's llama-4-scout for classification.
 
     Uses response_format={"type": "json_object"} to guarantee
-    valid JSON output from the model.
+    valid JSON output from the model. Catches API and parsing errors
+    to ensure pipeline reliability.
     """
     client = _get_groq_client()
 
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.0,
-        max_tokens=256,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=256,
+        )
 
-    raw = response.choices[0].message.content
-    data = json.loads(raw)
+        raw = response.choices[0].message.content
+        data = json.loads(raw)
 
-    return ClassificationResult(
-        reasoning=data["reasoning"],
-        stage=ProductionStage(data["stage"]),
-        confidence=float(data["confidence"]),
-    )
+        return ClassificationResult(
+            reasoning=data.get("reasoning", "LLM reasoning missing."),
+            stage=ProductionStage(data.get("stage", "UNCLASSIFIABLE")),
+            confidence=float(data.get("confidence", 0.0)),
+        )
+
+    except Exception as e:
+        # Catch network timeouts, rate limits, or JSON parsing errors
+        return ClassificationResult(
+            reasoning=f"System fallback due to LLM failure: {str(e)}",
+            stage=ProductionStage.UNCLASSIFIABLE,
+            confidence=0.0,
+        )
 
 
 # ---------------------------------------------------------------------------
