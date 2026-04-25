@@ -6,8 +6,15 @@ import json
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from messy_text.classifier import ClassifierConfig, MAX_INPUT_CHARS
-from messy_text.cli import _build_llm_classifier, _run_batch, main
+from messy_text.cli import (
+    _build_llm_classifier,
+    _run_batch,
+    load_batch_workers_from_env,
+    main,
+)
 from messy_text.errors import ConfigurationError, ProviderError
 from messy_text.models import ClassificationResult, ProductionStage
 
@@ -28,6 +35,17 @@ def test_build_llm_classifier_uses_find_dotenv():
     mock_load.assert_called_once_with("custom.env")
     mock_builder.assert_called_once_with()
 
+
+def test_load_batch_workers_from_env_rejects_invalid_values(monkeypatch):
+    monkeypatch.setenv("MESSY_TEXT_BATCH_WORKERS", "abc")
+
+    with pytest.raises(
+        ConfigurationError,
+        match="MESSY_TEXT_BATCH_WORKERS must be an integer.",
+    ):
+        load_batch_workers_from_env()
+
+
 def test_batch_uses_raw_text_for_non_jsonl_input(tmp_path, capsys):
     input_path = tmp_path / "input.jsonl"
     input_path.write_text("Principal photography began in Vancouver.\n", encoding="utf-8")
@@ -36,6 +54,7 @@ def test_batch_uses_raw_text_for_non_jsonl_input(tmp_path, capsys):
         str(input_path),
         llm_classifier=lambda text: None,
         classifier_config=ClassifierConfig(),
+        batch_workers=4,
     )
     output = json.loads(capsys.readouterr().out.strip())
 
@@ -60,6 +79,7 @@ def test_batch_preserves_full_input_text(tmp_path, capsys):
             confidence=0.4,
         ),
         classifier_config=ClassifierConfig(),
+        batch_workers=4,
     )
     output = json.loads(capsys.readouterr().out.strip())
 
@@ -81,6 +101,7 @@ def test_batch_emits_explicit_error_rows(tmp_path, capsys):
         str(input_path),
         llm_classifier=raise_provider_error,
         classifier_config=ClassifierConfig(),
+        batch_workers=4,
     )
     output = json.loads(capsys.readouterr().out.strip())
 
@@ -105,6 +126,7 @@ def test_batch_emits_input_validation_error_rows(tmp_path, capsys):
             confidence=0.9,
         ),
         classifier_config=ClassifierConfig(),
+        batch_workers=4,
     )
     output = json.loads(capsys.readouterr().out.strip())
 
@@ -122,6 +144,9 @@ def test_main_emits_json_error_for_single_input(capsys):
     ), patch(
         "messy_text.cli.load_classifier_config_from_env",
         return_value=ClassifierConfig(),
+    ), patch(
+        "messy_text.cli.load_batch_workers_from_env",
+        return_value=4,
     ):
         exit_code = main()
 
@@ -136,6 +161,9 @@ def test_main_emits_json_error_when_build_classifier_fails(capsys):
     with patch.object(sys, "argv", ["messy-text", "Ambiguous input"]), patch(
         "messy_text.cli._build_llm_classifier",
         side_effect=ConfigurationError("GROQ_API_KEY environment variable is not set."),
+    ), patch(
+        "messy_text.cli.load_batch_workers_from_env",
+        return_value=4,
     ):
         exit_code = main()
 
@@ -153,8 +181,11 @@ def test_main_emits_json_error_when_config_load_fails(capsys):
     ), patch(
         "messy_text.cli.load_classifier_config_from_env",
         side_effect=ConfigurationError(
-            "MESSY_TEXT_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0."
+            "Invalid classifier configuration: low_confidence_threshold must be between 0.0 and 1.0."
         ),
+    ), patch(
+        "messy_text.cli.load_batch_workers_from_env",
+        return_value=4,
     ):
         exit_code = main()
 
@@ -162,13 +193,35 @@ def test_main_emits_json_error_when_config_load_fails(capsys):
 
     assert exit_code == 1
     assert output["error_type"] == "configuration_error"
-    assert output["error"] == "MESSY_TEXT_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0."
+    assert (
+        output["error"]
+        == "Invalid classifier configuration: low_confidence_threshold must be between 0.0 and 1.0."
+    )
+
+
+def test_main_emits_json_error_when_batch_worker_config_load_fails(capsys):
+    with patch.object(sys, "argv", ["messy-text", "Ambiguous input"]), patch(
+        "messy_text.cli._build_llm_classifier",
+        return_value=MagicMock(),
+    ), patch(
+        "messy_text.cli.load_classifier_config_from_env",
+        return_value=ClassifierConfig(),
+    ), patch(
+        "messy_text.cli.load_batch_workers_from_env",
+        side_effect=ConfigurationError("MESSY_TEXT_BATCH_WORKERS must be an integer."),
+    ):
+        exit_code = main()
+
+    output = json.loads(capsys.readouterr().out.strip())
+
+    assert exit_code == 1
+    assert output["error_type"] == "configuration_error"
+    assert output["error"] == "MESSY_TEXT_BATCH_WORKERS must be an integer."
 
 
 def test_batch_uses_configured_thread_pool_and_preserves_order(
     tmp_path,
     capsys,
-    monkeypatch,
 ):
     input_path = tmp_path / "input.jsonl"
     input_path.write_text(
@@ -199,7 +252,6 @@ def test_batch_uses_configured_thread_pool_and_preserves_order(
             for item in iterable:
                 yield func(item)
 
-    monkeypatch.setenv("MESSY_TEXT_BATCH_WORKERS", "2")
     with patch("messy_text.cli.ThreadPoolExecutor", FakeExecutor):
         exit_code = _run_batch(
             str(input_path),
@@ -209,6 +261,7 @@ def test_batch_uses_configured_thread_pool_and_preserves_order(
                 confidence=0.9,
             ),
             classifier_config=ClassifierConfig(),
+            batch_workers=2,
         )
 
     outputs = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]

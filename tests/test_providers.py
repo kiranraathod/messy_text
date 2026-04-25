@@ -49,6 +49,7 @@ class TestGroqLLMClassifier:
         classifier = GroqLLMClassifier(client=mock_client)
         monkeypatch.setenv("MESSY_TEXT_MODEL", "changed-model")
 
+        assert classifier.model == "env-model"
         classifier("Some test text.")
 
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs

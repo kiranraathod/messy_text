@@ -133,33 +133,22 @@ def _fast_regex_router(text: str) -> ClassificationResult | None:
 
 
 def load_classifier_config_from_env() -> ClassifierConfig:
-    raw_threshold = os.environ.get("MESSY_TEXT_CONFIDENCE_THRESHOLD")
-    raw_max_input_chars = os.environ.get("MESSY_TEXT_MAX_INPUT_CHARS")
-
-    if raw_threshold is None:
-        low_confidence_threshold = LOW_CONFIDENCE_THRESHOLD
-    else:
-        try:
-            low_confidence_threshold = float(raw_threshold)
-        except ValueError as exc:
-            raise ConfigurationError(
-                "MESSY_TEXT_CONFIDENCE_THRESHOLD must be a float."
-            ) from exc
-
-    if raw_max_input_chars is None:
-        max_input_chars = MAX_INPUT_CHARS
-    else:
-        try:
-            max_input_chars = int(raw_max_input_chars)
-        except ValueError as exc:
-            raise ConfigurationError(
-                "MESSY_TEXT_MAX_INPUT_CHARS must be an integer."
-            ) from exc
-
-    return ClassifierConfig(
-        low_confidence_threshold=low_confidence_threshold,
-        max_input_chars=max_input_chars,
-    )
+    try:
+        return ClassifierConfig(
+            low_confidence_threshold=float(
+                os.environ.get(
+                    "MESSY_TEXT_CONFIDENCE_THRESHOLD",
+                    LOW_CONFIDENCE_THRESHOLD,
+                )
+            ),
+            max_input_chars=int(
+                os.environ.get("MESSY_TEXT_MAX_INPUT_CHARS", MAX_INPUT_CHARS)
+            ),
+        )
+    except (ValueError, ConfigurationError) as exc:
+        raise ConfigurationError(
+            f"Invalid classifier configuration: {exc}"
+        ) from exc
 
 
 def classify(

@@ -22,11 +22,13 @@ class GroqLLMClassifier:
     """Groq-backed classifier callable."""
 
     api_key: str | None = None
+    # Optional constructor override that is resolved to a concrete runtime model in __post_init__.
     model: str | None = None
     client: Groq | None = None
 
     def __post_init__(self) -> None:
         self.model = self.model or os.environ.get("MESSY_TEXT_MODEL", DEFAULT_GROQ_MODEL)
+        assert self.model is not None
 
         if self.client is not None:
             return

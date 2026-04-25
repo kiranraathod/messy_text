@@ -230,17 +230,17 @@ class TestClassifyPipeline:
             (
                 "MESSY_TEXT_CONFIDENCE_THRESHOLD",
                 "1.5",
-                "low_confidence_threshold must be between 0.0 and 1.0.",
+                "Invalid classifier configuration: low_confidence_threshold must be between 0.0 and 1.0.",
             ),
             (
                 "MESSY_TEXT_CONFIDENCE_THRESHOLD",
                 "-0.1",
-                "low_confidence_threshold must be between 0.0 and 1.0.",
+                "Invalid classifier configuration: low_confidence_threshold must be between 0.0 and 1.0.",
             ),
             (
                 "MESSY_TEXT_MAX_INPUT_CHARS",
                 "0",
-                "max_input_chars must be greater than 0.",
+                "Invalid classifier configuration: max_input_chars must be greater than 0.",
             ),
         ],
     )

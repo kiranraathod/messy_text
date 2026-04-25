@@ -16,8 +16,10 @@ from messy_text.classifier import (
     classify,
     load_classifier_config_from_env,
 )
-from messy_text.errors import StageClassifierOperationalError
+from messy_text.errors import ConfigurationError, StageClassifierOperationalError
 from messy_text.providers import GroqLLMClassifier
+
+DEFAULT_BATCH_WORKERS = 4
 
 
 def main() -> int:
@@ -25,6 +27,7 @@ def main() -> int:
     try:
         llm_classifier = _build_llm_classifier()
         classifier_config = load_classifier_config_from_env()
+        batch_workers = load_batch_workers_from_env()
     except StageClassifierOperationalError as exc:
         print(json.dumps(exc.to_dict()))
         return 1
@@ -33,7 +36,12 @@ def main() -> int:
         if len(sys.argv) < 3:
             print("Usage: messy-text --batch <input.jsonl>", file=sys.stderr)
             return 1
-        return _run_batch(sys.argv[2], llm_classifier, classifier_config)
+        return _run_batch(
+            sys.argv[2],
+            llm_classifier,
+            classifier_config,
+            batch_workers,
+        )
 
     if len(sys.argv) > 1:
         return _run_single(" ".join(sys.argv[1:]), llm_classifier, classifier_config)
@@ -50,6 +58,24 @@ def main() -> int:
 def _build_llm_classifier() -> GroqLLMClassifier:
     load_dotenv(find_dotenv(usecwd=True))
     return GroqLLMClassifier()
+
+
+def load_batch_workers_from_env() -> int:
+    try:
+        batch_workers = int(
+            os.environ.get("MESSY_TEXT_BATCH_WORKERS", str(DEFAULT_BATCH_WORKERS))
+        )
+    except ValueError as exc:
+        raise ConfigurationError(
+            "MESSY_TEXT_BATCH_WORKERS must be an integer."
+        ) from exc
+
+    if batch_workers <= 0:
+        raise ConfigurationError(
+            "MESSY_TEXT_BATCH_WORKERS must be greater than 0."
+        )
+
+    return batch_workers
 
 
 def _run_single(
@@ -96,11 +122,11 @@ def _run_batch(
     filepath: str,
     llm_classifier: LLMClassifier,
     classifier_config: ClassifierConfig,
+    batch_workers: int,
 ) -> int:
     had_errors = False
-    max_workers = int(os.environ.get("MESSY_TEXT_BATCH_WORKERS", "4"))
     with open(filepath, encoding="utf-8") as handle, ThreadPoolExecutor(
-        max_workers=max_workers
+        max_workers=batch_workers
     ) as executor:
         # GroqLLMClassifier is stateless after __post_init__; sharing across threads is safe.
         for output, has_error in executor.map(
