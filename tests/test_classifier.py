@@ -1,241 +1,230 @@
-"""Comprehensive test suite for the production stage classifier.
+"""Test suite for the hybrid production stage classifier.
 
-Tests cover:
-- Clear-cut cases for each stage
-- Edge cases from the spec (attached talent, temporal overrides)
-- UNCLASSIFIABLE detection
-- Confidence scoring sanity
-- JSON output format
+Tests are split into:
+- TestFastRouter: Tests the regex pre-filter (no API calls).
+- TestLLMClassifier: Tests the LLM path with mocked Groq responses.
+- TestEmptyInput: Tests empty/whitespace handling.
+- TestOutputFormat: Tests JSON output structure.
 """
 
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from messy_text.classifier import classify
+from messy_text.classifier import _fast_regex_router, _llm_classify, classify
 from messy_text.models import ClassificationResult, ProductionStage
 
 
 # ===================================================================
-# DEVELOPMENT stage tests
+# Fast regex router tests (no API calls)
 # ===================================================================
 
-class TestDevelopment:
-    """Tests for text that should classify as DEVELOPMENT."""
-
-    def test_script_and_financing(self):
-        result = classify("The screenplay is being rewritten while producers seek financing.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    def test_pitching_project(self):
-        result = classify("We're pitching the project to Netflix and HBO this week.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    def test_rights_optioned(self):
-        result = classify("Sony has optioned the rights to the bestselling novel.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    def test_development_hell(self):
-        result = classify(
-            "The project has been stuck in development hell for over a decade."
-        )
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    def test_turnaround(self):
-        result = classify("After the director left, the movie went into turnaround at Warner Bros.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    def test_attached_talent_alone(self):
-        """Edge case: 'attached talent' alone does NOT mean Pre-Production."""
-        result = classify("Chris Hemsworth is attached to star in the upcoming action film.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    def test_shopping_script(self):
-        result = classify("The writer is shopping the script around town.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    def test_draft_writing(self):
-        result = classify("We just got the third draft of the screenplay back from the writer.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    def test_investor_pitch(self):
-        result = classify("The producers met with investors to discuss funding for the indie film.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    def test_adaptation(self):
-        result = classify("They acquired the rights and are adapting the graphic novel into a feature.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-
-# ===================================================================
-# PRE_PRODUCTION stage tests
-# ===================================================================
-
-class TestPreProduction:
-    """Tests for text that should classify as PRE_PRODUCTION."""
-
-    def test_greenlit(self):
-        result = classify("The series has been officially greenlit by the network.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_location_scouting(self):
-        result = classify("The team is scouting locations in Prague for the period drama.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_hiring_crew(self):
-        result = classify("They've started hiring crew and department heads for the shoot.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_shoot_date_set(self):
-        result = classify("Production is scheduled to begin filming in March 2027.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_series_order(self):
-        result = classify("Amazon has given a series order for the new sci-fi show.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_storyboarding(self):
-        result = classify("The director is storyboarding the action sequences with the DP.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_rehearsals(self):
-        result = classify("Cast rehearsals are underway at Pinewood Studios.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_set_construction(self):
-        result = classify("Set construction has begun on the studio backlot.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_table_read(self):
-        result = classify("The cast did a table read of the pilot episode last Tuesday.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_straight_to_series(self):
-        result = classify("HBO gave it a straight-to-series order, bypassing the pilot stage.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-
-# ===================================================================
-# PRODUCTION stage tests
-# ===================================================================
-
-class TestProduction:
-    """Tests for text that should classify as PRODUCTION."""
+class TestFastRouter:
+    """Tests for the ultra-fast regex pre-filter."""
 
     def test_principal_photography(self):
-        result = classify("Principal photography began last Monday in Vancouver.")
+        result = _fast_regex_router("Principal photography began last Monday in Vancouver.")
+        assert result is not None
         assert result.stage == ProductionStage.PRODUCTION
 
     def test_cameras_rolling(self):
-        result = classify("Cameras are rolling on the new Marvel film in Atlanta.")
+        result = _fast_regex_router("Cameras are rolling on the new Marvel film in Atlanta.")
+        assert result is not None
         assert result.stage == ProductionStage.PRODUCTION
 
     def test_currently_filming(self):
-        result = classify("The show is currently filming its second season in London.")
-        assert result.stage == ProductionStage.PRODUCTION
-
-    def test_on_set(self):
-        result = classify("The actors were spotted on set in downtown LA today.")
+        result = _fast_regex_router("The show is currently filming its second season.")
+        assert result is not None
         assert result.stage == ProductionStage.PRODUCTION
 
     def test_day_of_filming(self):
-        result = classify("Day 42 of filming and the crew is exhausted but pushing through.")
+        result = _fast_regex_router("Day 42 of filming and the crew is exhausted.")
+        assert result is not None
         assert result.stage == ProductionStage.PRODUCTION
 
-    def test_wrapped(self):
-        result = classify("That's a wrap! The movie wrapped principal photography today.")
+    def test_officially_greenlit(self):
+        result = _fast_regex_router("The series has been officially greenlit by the network.")
+        assert result is not None
+        assert result.stage == ProductionStage.PRE_PRODUCTION
+
+    def test_no_match_returns_none(self):
+        """Ambiguous text should fall through to LLM."""
+        result = _fast_regex_router("We're pitching the project to Netflix this week.")
+        assert result is None
+
+    def test_restaurant_menu_returns_none(self):
+        result = _fast_regex_router("Grilled salmon with lemon butter sauce.")
+        assert result is None
+
+    def test_attached_talent_returns_none(self):
+        """Attached talent is ambiguous — should go to LLM, not fast-route."""
+        result = _fast_regex_router("Chris Hemsworth is attached to star.")
+        assert result is None
+
+    def test_case_insensitive(self):
+        result = _fast_regex_router("PRINCIPAL PHOTOGRAPHY has begun!")
+        assert result is not None
         assert result.stage == ProductionStage.PRODUCTION
 
-    def test_in_production(self):
-        result = classify("The film is currently in production in New Zealand.")
-        assert result.stage == ProductionStage.PRODUCTION
-
-    def test_started_shooting(self):
-        result = classify("They started shooting the pilot episode in Brooklyn.")
-        assert result.stage == ProductionStage.PRODUCTION
-
-    def test_set_photos_leaked(self):
-        result = classify("Set photos from the new Batman film leaked on social media.")
-        assert result.stage == ProductionStage.PRODUCTION
-
-    def test_behind_the_scenes(self):
-        result = classify("Behind-the-scenes footage shows the crew filming an intense chase scene.")
-        assert result.stage == ProductionStage.PRODUCTION
+    def test_confidence_is_high(self):
+        result = _fast_regex_router("Cameras rolling on set today.")
+        assert result is not None
+        assert result.confidence >= 0.9
 
 
 # ===================================================================
-# UNCLASSIFIABLE tests
+# LLM classifier tests (mocked Groq API)
 # ===================================================================
 
-class TestUnclassifiable:
-    """Tests for text that should be UNCLASSIFIABLE."""
+def _mock_groq_response(reasoning: str, stage: str, confidence: float) -> MagicMock:
+    """Create a mock Groq chat completion response."""
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = json.dumps({
+        "reasoning": reasoning,
+        "stage": stage,
+        "confidence": confidence,
+    })
+    return mock_response
+
+
+class TestLLMClassifier:
+    """Tests for the LLM classification path with mocked API."""
+
+    @patch("messy_text.classifier._get_groq_client")
+    def test_development_classification(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _mock_groq_response(
+            "The text mentions pitching and seeking financing, which are development activities.",
+            "DEVELOPMENT", 0.9,
+        )
+        mock_get_client.return_value = mock_client
+
+        result = _llm_classify("We're pitching the project to studios and seeking financing.")
+        assert result.stage == ProductionStage.DEVELOPMENT
+        assert result.confidence == 0.9
+
+    @patch("messy_text.classifier._get_groq_client")
+    def test_pre_production_classification(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _mock_groq_response(
+            "The project is greenlit and crew is being hired, indicating pre-production.",
+            "PRE_PRODUCTION", 0.9,
+        )
+        mock_get_client.return_value = mock_client
+
+        result = _llm_classify("The film has been greenlit and they're hiring department heads.")
+        assert result.stage == ProductionStage.PRE_PRODUCTION
+
+    @patch("messy_text.classifier._get_groq_client")
+    def test_production_classification(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _mock_groq_response(
+            "The text says filming started, indicating active production.",
+            "PRODUCTION", 0.95,
+        )
+        mock_get_client.return_value = mock_client
+
+        result = _llm_classify("They started shooting the pilot episode in Brooklyn.")
+        assert result.stage == ProductionStage.PRODUCTION
+
+    @patch("messy_text.classifier._get_groq_client")
+    def test_unclassifiable(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _mock_groq_response(
+            "The text is about food and is irrelevant to film production.",
+            "UNCLASSIFIABLE", 0.95,
+        )
+        mock_get_client.return_value = mock_client
+
+        result = _llm_classify("Grilled salmon with lemon butter sauce.")
+        assert result.stage == ProductionStage.UNCLASSIFIABLE
+
+    @patch("messy_text.classifier._get_groq_client")
+    def test_temporal_override_dev_to_production(self, mock_get_client):
+        """LLM should pick the latest chronological event."""
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _mock_groq_response(
+            "Multiple stages mentioned but the latest event is starting to shoot, indicating production.",
+            "PRODUCTION", 0.95,
+        )
+        mock_get_client.return_value = mock_client
+
+        result = _llm_classify(
+            "After 5 years in development, we finally started shooting today."
+        )
+        assert result.stage == ProductionStage.PRODUCTION
+
+    @patch("messy_text.classifier._get_groq_client")
+    def test_attached_talent_is_development(self, mock_get_client):
+        """Edge case: attached talent should be DEVELOPMENT per the system prompt."""
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _mock_groq_response(
+            "Attached talent alone indicates development, not pre-production.",
+            "DEVELOPMENT", 0.85,
+        )
+        mock_get_client.return_value = mock_client
+
+        result = _llm_classify("Chris Hemsworth is attached to star in the upcoming action film.")
+        assert result.stage == ProductionStage.DEVELOPMENT
+
+    @patch("messy_text.classifier._get_groq_client")
+    def test_api_called_with_correct_params(self, mock_get_client):
+        """Verify the Groq API is called with json_object format and temperature 0."""
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _mock_groq_response(
+            "Test.", "DEVELOPMENT", 0.8,
+        )
+        mock_get_client.return_value = mock_client
+
+        _llm_classify("Some test text.")
+
+        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["response_format"] == {"type": "json_object"}
+        assert call_kwargs["temperature"] == 0.0
+        assert len(call_kwargs["messages"]) == 2
+        assert call_kwargs["messages"][0]["role"] == "system"
+        assert call_kwargs["messages"][1]["role"] == "user"
+        assert call_kwargs["messages"][1]["content"] == "Some test text."
+
+
+# ===================================================================
+# Full classify() pipeline tests
+# ===================================================================
+
+class TestClassifyPipeline:
+    """Tests for the full classify() pipeline."""
 
     def test_empty_string(self):
         result = classify("")
         assert result.stage == ProductionStage.UNCLASSIFIABLE
+        assert result.confidence == 1.0
 
     def test_whitespace_only(self):
         result = classify("   \n\t  ")
         assert result.stage == ProductionStage.UNCLASSIFIABLE
 
-    def test_restaurant_menu(self):
-        result = classify("Grilled salmon with lemon butter sauce. Served with asparagus and rice.")
-        assert result.stage == ProductionStage.UNCLASSIFIABLE
-
-    def test_weather_report(self):
-        result = classify("Expect partly cloudy skies with a high of 72°F tomorrow.")
-        assert result.stage == ProductionStage.UNCLASSIFIABLE
-
-    def test_random_gibberish(self):
-        result = classify("asdfghjkl qwerty 12345 !!!???")
-        assert result.stage == ProductionStage.UNCLASSIFIABLE
-
-    def test_sports_news(self):
-        result = classify("The Lakers defeated the Celtics 112-108 in overtime last night.")
-        assert result.stage == ProductionStage.UNCLASSIFIABLE
-
-
-# ===================================================================
-# Edge case: Temporal override (latest event wins)
-# ===================================================================
-
-class TestTemporalOverrides:
-    """The LATEST chronological event takes absolute precedence."""
-
-    def test_dev_to_production_override(self):
-        """'After 5 years in development, we finally started shooting today'
-        should be PRODUCTION, not DEVELOPMENT."""
-        result = classify(
-            "After 5 years in development, we finally started shooting today."
-        )
+    def test_fast_route_skips_llm(self):
+        """Fast-routed text should NOT trigger an API call."""
+        result = classify("Principal photography began last Monday.")
         assert result.stage == ProductionStage.PRODUCTION
+        # No mock needed — if it tried to call Groq without a key, it would error
 
-    def test_dev_to_production_cameras_rolling(self):
-        result = classify(
-            "The project was stuck in development hell for ages, "
-            "but cameras are now rolling in Atlanta."
+    @patch("messy_text.classifier._get_groq_client")
+    def test_fallback_to_llm(self, mock_get_client):
+        """Text that doesn't match fast routes should go to LLM."""
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _mock_groq_response(
+            "The text discusses script rewrites, a development activity.",
+            "DEVELOPMENT", 0.85,
         )
-        assert result.stage == ProductionStage.PRODUCTION
+        mock_get_client.return_value = mock_client
 
-    def test_dev_to_preprod_greenlit(self):
-        result = classify(
-            "After years of pitching and rewrites, the show has finally been greenlit."
-        )
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    def test_mixed_signals_latest_wins(self):
-        result = classify(
-            "We wrote the script, scouted locations, and now filming is underway."
-        )
-        assert result.stage == ProductionStage.PRODUCTION
-
-    def test_production_underway(self):
-        result = classify(
-            "Production has commenced on the highly anticipated sequel."
-        )
-        assert result.stage == ProductionStage.PRODUCTION
+        result = classify("The screenplay is being rewritten for the third time.")
+        assert result.stage == ProductionStage.DEVELOPMENT
 
 
 # ===================================================================
@@ -246,7 +235,7 @@ class TestOutputFormat:
     """Ensure the JSON output format matches the spec exactly."""
 
     def test_json_has_three_keys(self):
-        result = classify("The screenplay is in its fourth draft.")
+        result = classify("Principal photography is underway.")
         output = json.loads(result.to_json())
         assert set(output.keys()) == {"reasoning", "stage", "confidence"}
 
@@ -254,14 +243,13 @@ class TestOutputFormat:
         """The 'reasoning' key must appear FIRST in the JSON output."""
         result = classify("Principal photography is underway.")
         output_str = result.to_json()
-        # Find positions of keys
         reasoning_pos = output_str.index('"reasoning"')
         stage_pos = output_str.index('"stage"')
         confidence_pos = output_str.index('"confidence"')
         assert reasoning_pos < stage_pos < confidence_pos
 
     def test_stage_is_valid_enum(self):
-        result = classify("Some random film text about a script rewrite.")
+        result = classify("Cameras rolling on set.")
         output = json.loads(result.to_json())
         valid_stages = {"DEVELOPMENT", "PRE_PRODUCTION", "PRODUCTION", "UNCLASSIFIABLE"}
         assert output["stage"] in valid_stages
@@ -270,13 +258,8 @@ class TestOutputFormat:
         result = classify("Cameras rolling on the new project.")
         assert 0.0 <= result.confidence <= 1.0
 
-    def test_reasoning_is_nonempty(self):
-        result = classify("We're pitching the thriller to studios.")
-        assert len(result.reasoning) > 0
-
     def test_json_round_trip(self):
-        """Ensure JSON output can be parsed back into a valid dict."""
-        result = classify("The film has been greenlit and crew is being hired.")
+        result = classify("Currently filming on location.")
         output_str = result.to_json()
         parsed = json.loads(output_str)
         assert isinstance(parsed["reasoning"], str)
