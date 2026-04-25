@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>messy-text — Production Stage Classifier</title>
+<meta name="description" content="Classify messy film/TV text into production stages: Development, Pre-Production, Production.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
+  --text:#e8e8f0;--text-muted:#8888a0;--accent:#7c5cfc;--accent-glow:#7c5cfc40;
+  --dev:#f59e0b;--dev-bg:#f59e0b15;--preprod:#3b82f6;--preprod-bg:#3b82f615;
+  --prod:#10b981;--prod-bg:#10b98115;--unclass:#6b7280;--unclass-bg:#6b728015;
+  --radius:12px;--font:'Inter',system-ui,sans-serif;--mono:'JetBrains Mono',monospace;
+}
+html{font-size:16px}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column;align-items:center;overflow-x:hidden}
+.container{width:100%;max-width:720px;padding:2rem 1.5rem}
+
+/* Header */
+header{text-align:center;margin-bottom:2.5rem}
+header h1{font-size:1.75rem;font-weight:800;background:linear-gradient(135deg,#7c5cfc,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-0.02em}
+header p{color:var(--text-muted);font-size:0.875rem;margin-top:0.5rem}
+
+/* Input area */
+.input-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;position:relative;transition:border-color .2s}
+.input-card:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
+#text-input{width:100%;min-height:120px;max-height:300px;resize:vertical;background:transparent;border:none;color:var(--text);font-family:var(--font);font-size:0.95rem;line-height:1.6;outline:none}
+#text-input::placeholder{color:var(--text-muted)}
+.input-footer{display:flex;justify-content:space-between;align-items:center;margin-top:1rem;gap:0.75rem}
+.char-count{font-size:0.75rem;color:var(--text-muted);font-family:var(--mono)}
+#classify-btn{
+  padding:0.625rem 1.5rem;border:none;border-radius:8px;font-family:var(--font);font-weight:600;font-size:0.875rem;
+  background:linear-gradient(135deg,#7c5cfc,#9f7aea);color:#fff;cursor:pointer;transition:all .2s;
+}
+#classify-btn:hover{transform:translateY(-1px);box-shadow:0 4px 20px var(--accent-glow)}
+#classify-btn:active{transform:translateY(0)}
+#classify-btn:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+
+/* Examples */
+.examples{margin-top:1.25rem;display:flex;flex-wrap:wrap;gap:0.5rem}
+.example-chip{
+  padding:0.375rem 0.75rem;border-radius:20px;font-size:0.75rem;font-weight:500;
+  background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);
+  cursor:pointer;transition:all .2s;white-space:nowrap;
+}
+.example-chip:hover{border-color:var(--accent);color:var(--text);background:var(--accent-glow)}
+
+/* Result */
+.result-card{
+  margin-top:1.5rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  overflow:hidden;opacity:0;transform:translateY(12px);transition:all .35s ease;
+}
+.result-card.visible{opacity:1;transform:translateY(0)}
+.result-header{padding:1rem 1.25rem;display:flex;align-items:center;gap:1rem;border-bottom:1px solid var(--border)}
+.stage-badge{
+  display:inline-flex;align-items:center;gap:0.4rem;padding:0.375rem 0.875rem;
+  border-radius:20px;font-size:0.8rem;font-weight:700;font-family:var(--mono);letter-spacing:0.03em;
+}
+.stage-badge .dot{width:8px;height:8px;border-radius:50%;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.stage-DEVELOPMENT .dot{background:var(--dev)}.stage-DEVELOPMENT{color:var(--dev);background:var(--dev-bg);border:1px solid var(--dev)}
+.stage-PRE_PRODUCTION .dot{background:var(--preprod)}.stage-PRE_PRODUCTION{color:var(--preprod);background:var(--preprod-bg);border:1px solid var(--preprod)}
+.stage-PRODUCTION .dot{background:var(--prod)}.stage-PRODUCTION{color:var(--prod);background:var(--prod-bg);border:1px solid var(--prod)}
+.stage-UNCLASSIFIABLE .dot{background:var(--unclass)}.stage-UNCLASSIFIABLE{color:var(--unclass);background:var(--unclass-bg);border:1px solid var(--unclass)}
+.confidence-bar{flex:1;height:6px;background:var(--surface2);border-radius:3px;overflow:hidden}
+.confidence-fill{height:100%;border-radius:3px;transition:width .6s ease}
+.confidence-label{font-size:0.8rem;font-weight:600;font-family:var(--mono);min-width:3rem;text-align:right}
+.result-body{padding:1.25rem}
+.reasoning{font-size:0.875rem;line-height:1.7;color:var(--text-muted)}
+.json-toggle{
+  margin-top:1rem;font-size:0.75rem;color:var(--accent);cursor:pointer;font-weight:500;
+  display:inline-flex;align-items:center;gap:0.3rem;border:none;background:none;font-family:var(--font);
+}
+.json-block{
+  margin-top:0.75rem;padding:1rem;background:var(--bg);border-radius:8px;
+  font-family:var(--mono);font-size:0.8rem;line-height:1.6;color:var(--text-muted);
+  display:none;overflow-x:auto;
+}
+.json-block.open{display:block}
+
+/* Loading */
+.loading{display:none;justify-content:center;padding:2rem}
+.loading.active{display:flex}
+.spinner{width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Footer */
+footer{margin-top:auto;padding:1.5rem;text-align:center;font-size:0.75rem;color:var(--text-muted)}
+footer a{color:var(--accent);text-decoration:none}
+
+@media(max-width:480px){
+  .container{padding:1.25rem 1rem}
+  header h1{font-size:1.5rem}
+  .examples{gap:0.375rem}
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🎬 messy-text</h1>
+    <p>Classify messy film & TV text into production stages</p>
+  </header>
+
+  <div class="input-card">
+    <textarea id="text-input" placeholder="Paste messy production text here... e.g. 'After 5 years in development, we finally started shooting today.'"></textarea>
+    <div class="input-footer">
+      <span class="char-count" id="char-count">0 chars</span>
+      <button id="classify-btn">Classify ⏎</button>
+    </div>
+  </div>
+
+  <div class="examples" id="examples">
+    <button class="example-chip" data-text="The screenplay is being rewritten while producers seek financing from investors.">Script & Financing</button>
+    <button class="example-chip" data-text="The series has been officially greenlit and they're scouting locations in Prague.">Greenlit & Scouting</button>
+    <button class="example-chip" data-text="Principal photography began last Monday in Vancouver.">Principal Photography</button>
+    <button class="example-chip" data-text="After 5 years in development, we finally started shooting today.">Dev → Production</button>
+    <button class="example-chip" data-text="Chris Hemsworth is attached to star in the upcoming action film.">Attached Talent</button>
+    <button class="example-chip" data-text="Grilled salmon with lemon butter sauce. Served with asparagus.">Not Film Related</button>
+  </div>
+
+  <div class="loading" id="loading"><div class="spinner"></div></div>
+
+  <div class="result-card" id="result-card">
+    <div class="result-header">
+      <span class="stage-badge" id="stage-badge"><span class="dot"></span><span id="stage-text"></span></span>
+      <div class="confidence-bar"><div class="confidence-fill" id="confidence-fill"></div></div>
+      <span class="confidence-label" id="confidence-label"></span>
+    </div>
+    <div class="result-body">
+      <div class="reasoning" id="reasoning"></div>
+      <button class="json-toggle" id="json-toggle">▶ Raw JSON</button>
+      <pre class="json-block" id="json-block"></pre>
+    </div>
+  </div>
+</div>
+
+<footer>Built with Python &amp; zero dependencies &mdash; <a href="https://github.com/kiranraathod/messy_text" target="_blank">GitHub</a></footer>
+
+<script>
+const input = document.getElementById('text-input');
+const btn = document.getElementById('classify-btn');
+const charCount = document.getElementById('char-count');
+const loading = document.getElementById('loading');
+const resultCard = document.getElementById('result-card');
+const stageBadge = document.getElementById('stage-badge');
+const stageText = document.getElementById('stage-text');
+const confFill = document.getElementById('confidence-fill');
+const confLabel = document.getElementById('confidence-label');
+const reasoning = document.getElementById('reasoning');
+const jsonToggle = document.getElementById('json-toggle');
+const jsonBlock = document.getElementById('json-block');
+
+const stageColors = {
+  DEVELOPMENT: '#f59e0b', PRE_PRODUCTION: '#3b82f6',
+  PRODUCTION: '#10b981', UNCLASSIFIABLE: '#6b7280'
+};
+
+input.addEventListener('input', () => {
+  charCount.textContent = `${input.value.length} chars`;
+});
+
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doClassify(); }
+});
+
+btn.addEventListener('click', doClassify);
+
+document.getElementById('examples').addEventListener('click', (e) => {
+  const chip = e.target.closest('.example-chip');
+  if (!chip) return;
+  input.value = chip.dataset.text;
+  charCount.textContent = `${input.value.length} chars`;
+  doClassify();
+});
+
+jsonToggle.addEventListener('click', () => {
+  jsonBlock.classList.toggle('open');
+  jsonToggle.textContent = jsonBlock.classList.contains('open') ? '▼ Raw JSON' : '▶ Raw JSON';
+});
+
+async function doClassify() {
+  const text = input.value.trim();
+  if (!text) return;
+  btn.disabled = true;
+  loading.classList.add('active');
+  resultCard.classList.remove('visible');
+  try {
+    const res = await fetch('/api/classify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    const data = await res.json();
+    showResult(data);
+  } catch (err) {
+    reasoning.textContent = 'Error: ' + err.message;
+    resultCard.classList.add('visible');
+  } finally {
+    btn.disabled = false;
+    loading.classList.remove('active');
+  }
+}
+
+function showResult(data) {
+  const stage = data.stage;
+  const conf = data.confidence;
+  stageBadge.className = 'stage-badge stage-' + stage;
+  stageText.textContent = stage.replace('_', ' ');
+  confFill.style.width = (conf * 100) + '%';
+  confFill.style.background = stageColors[stage] || '#888';
+  confLabel.textContent = Math.round(conf * 100) + '%';
+  confLabel.style.color = stageColors[stage] || '#888';
+  reasoning.textContent = data.reasoning;
+  jsonBlock.textContent = JSON.stringify(data, null, 2);
+  jsonBlock.classList.remove('open');
+  jsonToggle.textContent = '▶ Raw JSON';
+  resultCard.classList.add('visible');
+}
+</script>
+</body>
+</html>
