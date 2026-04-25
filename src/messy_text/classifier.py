@@ -12,10 +12,16 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 
+from dotenv import load_dotenv
 from groq import Groq
 
 from messy_text.models import ClassificationResult, ProductionStage
+
+# Auto-load .env from project root (walks up from this file)
+_env_path = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(_env_path)
 
 
 # ---------------------------------------------------------------------------
@@ -123,9 +129,8 @@ def _llm_classify(text: str) -> ClassificationResult:
     valid JSON output from the model. Catches API and parsing errors
     to ensure pipeline reliability.
     """
-    client = _get_groq_client()
-
     try:
+        client = _get_groq_client()
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[

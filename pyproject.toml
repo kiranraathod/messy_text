@@ -7,11 +7,11 @@ requires-python = ">=3.13"
 dependencies = [
     "pydantic>=2.0",
     "groq>=0.25.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]
 messy-text = "messy_text.cli:main"
-messy-text-server = "messy_text.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
