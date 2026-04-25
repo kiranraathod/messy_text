@@ -1,177 +1,174 @@
-"""Hybrid classification engine for film/TV production stage detection.
-
-Architecture:
-    1. _fast_regex_router() — Ultra-fast pre-filter for obvious cases.
-       Catches exact high-confidence phrases to skip the LLM entirely.
-    2. _llm_classify() — Primary classifier using Groq (llama-4-scout).
-       Handles all ambiguous, messy, or multi-signal text.
-"""
+"""Core classification logic for film/TV production stage detection."""
 
 from __future__ import annotations
 
-import json
-import os
 import re
-from pathlib import Path
+from dataclasses import dataclass
+from collections.abc import Callable
+import os
 
-from dotenv import load_dotenv
-from groq import Groq
-
+from messy_text.errors import ConfigurationError, InputValidationError
 from messy_text.models import ClassificationResult, ProductionStage
 
-# Auto-load .env from project root (walks up from this file)
-_env_path = Path(__file__).resolve().parents[2] / ".env"
-load_dotenv(_env_path)
+LLMClassifier = Callable[[str], ClassificationResult]
+LOW_CONFIDENCE_THRESHOLD = 0.5
+MAX_INPUT_CHARS = 2000
 
 
-# ---------------------------------------------------------------------------
-# System prompt — canonical taxonomy for the LLM
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ClassifierConfig:
+    """Runtime classifier settings resolved once at startup."""
+
+    low_confidence_threshold: float = LOW_CONFIDENCE_THRESHOLD
+    max_input_chars: int = MAX_INPUT_CHARS
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.low_confidence_threshold <= 1.0:
+            raise ConfigurationError(
+                "low_confidence_threshold must be between 0.0 and 1.0."
+            )
+        if self.max_input_chars <= 0:
+            raise ConfigurationError(
+                "max_input_chars must be greater than 0."
+            )
+
 
 SYSTEM_PROMPT = """
-You are an expert data pipeline system for the film and television industry. Your task is to classify messy, unstructured text into an exact production stage.
+You classify messy film and television production text into one production stage.
 
-CRITICAL INSTRUCTION: Keep the classification and reasoning simple. Avoid unnecessary complexity, over-analyzing the text, or making assumptions beyond what is explicitly stated. 
-CRITICAL INSTRUCTION: You must output a valid JSON object. To ensure accuracy, you must generate the "reasoning" key FIRST, before you output the "stage" or "confidence" keys.
+Return only a JSON object with these keys:
+- reasoning: a brief explanation grounded only in the text
+- stage: one of DEVELOPMENT, PRE_PRODUCTION, PRODUCTION, UNCLASSIFIABLE
+- confidence: a float between 0.0 and 1.0
 
-Taxonomy:
-1. DEVELOPMENT: Exists on paper. Rights optioned, pitching, seeking financing, or attaching talent. (Note: "turnaround" or "development hell" remains DEVELOPMENT).
-2. PRE_PRODUCTION: Officially "greenlit" and definitively funded. Hiring crew (department heads), scouting locations, setting shoot dates.
-3. PRODUCTION: Active filming. Principal photography, cameras rolling, on set/location.
-4. UNCLASSIFIABLE: Irrelevant to film, or lacks chronological markers.
-
-Edge Case Rules:
-- "Attached talent" alone is DEVELOPMENT, not Pre-Production.
-- If multiple stages are mentioned (e.g., "After 5 years in development, we started shooting today"), the LATEST chronological event takes absolute precedence.
-
-Output JSON exactly like this:
-{
-  "reasoning": "A simple 1-2 sentence logical deduction.",
-  "stage": "DEVELOPMENT" | "PRE_PRODUCTION" | "PRODUCTION" | "UNCLASSIFIABLE",
-  "confidence": 0.95
-}
+Rules:
+- Keep the reasoning short and concrete.
+- Do not invent facts that are not in the text.
+- DEVELOPMENT: scripts, rights, pitching, financing, talent attachment, development hell, turnaround.
+- PRE_PRODUCTION: greenlit and funded, hiring crew, scouting, or scheduling shoot dates.
+- PRODUCTION: active filming, principal photography, cameras rolling, or shooting on set/location.
+- UNCLASSIFIABLE: irrelevant text or not enough signal to place it in a stage.
+- If multiple stages are mentioned, choose the latest chronological event.
+- "Attached talent" by itself is DEVELOPMENT.
 """.strip()
 
-GROQ_MODEL = os.environ.get("MESSY_TEXT_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
-
-# ---------------------------------------------------------------------------
-# Fast regex router — dumb, cheap, and obvious-only
-# ---------------------------------------------------------------------------
-
-# Each tuple: (compiled regex, stage, confidence, reasoning)
+# Exact phrase shortcuts only. Everything else should be decided by the LLM.
 _FAST_ROUTES: list[tuple[re.Pattern[str], ProductionStage, float, str]] = [
-    # --- PRODUCTION: unmistakable active-shooting phrases ---
-    (re.compile(r"\bprincipal\s+photography\b", re.IGNORECASE),
-     ProductionStage.PRODUCTION, 0.95,
-     "The text explicitly mentions 'principal photography', indicating active filming."),
-
-    (re.compile(r"\bcameras?\s+(?:are\s+)?roll(?:s|ing|ed)\b", re.IGNORECASE),
-     ProductionStage.PRODUCTION, 0.95,
-     "The text mentions cameras rolling, indicating active filming."),
-
-    (re.compile(r"\bcurrently\s+(?:filming|shooting)\b", re.IGNORECASE),
-     ProductionStage.PRODUCTION, 0.95,
-     "The text states filming/shooting is currently happening."),
-
-    (re.compile(r"\bday\s+\d+\s+of\s+(?:filming|shooting|production)\b", re.IGNORECASE),
-     ProductionStage.PRODUCTION, 0.95,
-     "The text references a specific day of an active shoot."),
-
-    # --- PRE_PRODUCTION: definitive greenlight ---
-    (re.compile(r"\bofficially\s+greenl(?:it|ight(?:ed)?)\b", re.IGNORECASE),
-     ProductionStage.PRE_PRODUCTION, 0.95,
-     "The text explicitly states the project is officially greenlit."),
+    (
+        re.compile(r"\bprincipal\s+photography\b", re.IGNORECASE),
+        ProductionStage.PRODUCTION,
+        0.95,
+        "The text explicitly mentions principal photography, indicating active filming.",
+    ),
+    (
+        re.compile(r"\bcameras?\s+(?:are\s+)?roll(?:s|ing|ed)\b", re.IGNORECASE),
+        ProductionStage.PRODUCTION,
+        0.95,
+        "The text mentions cameras rolling, indicating active filming.",
+    ),
+    (
+        re.compile(r"\bcurrently\s+(?:filming|shooting)\b", re.IGNORECASE),
+        ProductionStage.PRODUCTION,
+        0.95,
+        "The text states filming or shooting is currently happening.",
+    ),
+    (
+        re.compile(r"\bday\s+\d+\s+of\s+(?:filming|shooting|production)\b", re.IGNORECASE),
+        ProductionStage.PRODUCTION,
+        0.95,
+        "The text references a specific day of an active shoot.",
+    ),
+    (
+        re.compile(r"\bofficially\s+greenl(?:it|ight(?:ed)?)\b", re.IGNORECASE),
+        ProductionStage.PRE_PRODUCTION,
+        0.95,
+        "The text explicitly states the project is officially greenlit.",
+    ),
+    (
+        re.compile(r"\bin\s+turnaround\b", re.IGNORECASE),
+        ProductionStage.DEVELOPMENT,
+        0.93,
+        "The text explicitly says the project is in turnaround, indicating development.",
+    ),
+    (
+        re.compile(r"\bseeking\s+(?:film\s+)?financing\b", re.IGNORECASE),
+        ProductionStage.DEVELOPMENT,
+        0.92,
+        "The text mentions seeking financing, indicating development.",
+    ),
+    (
+        re.compile(r"\bstart(?:ing|ed)\s+pre-?production\b", re.IGNORECASE),
+        ProductionStage.PRE_PRODUCTION,
+        0.93,
+        "The text states pre-production is starting, indicating pre-production.",
+    ),
+    (
+        re.compile(r"\bscout(?:ing|ed)\s+locations?\b", re.IGNORECASE),
+        ProductionStage.PRE_PRODUCTION,
+        0.92,
+        "The text mentions scouting locations, indicating pre-production.",
+    ),
 ]
 
 
 def _fast_regex_router(text: str) -> ClassificationResult | None:
-    """Ultra-fast pre-filter for obvious, high-confidence cases.
+    """Return a result for exact high-confidence phrases, otherwise None."""
+    matches = [
+        (stage, confidence, reasoning)
+        for pattern, stage, confidence, reasoning in _FAST_ROUTES
+        if pattern.search(text)
+    ]
+    if len(matches) > 1:
+        return None
 
-    Returns a ClassificationResult if an unmistakable phrase is found,
-    or None if the text needs full LLM classification.
-    """
-    for pattern, stage, confidence, reasoning in _FAST_ROUTES:
-        if pattern.search(text):
-            return ClassificationResult(
-                reasoning=reasoning,
-                stage=stage,
-                confidence=confidence,
-            )
+    if matches:
+        stage, confidence, reasoning = matches[0]
+        return ClassificationResult(
+            reasoning=reasoning,
+            stage=stage,
+            confidence=confidence,
+        )
     return None
 
 
-# ---------------------------------------------------------------------------
-# LLM classifier — primary engine via Groq
-# ---------------------------------------------------------------------------
+def load_classifier_config_from_env() -> ClassifierConfig:
+    raw_threshold = os.environ.get("MESSY_TEXT_CONFIDENCE_THRESHOLD")
+    raw_max_input_chars = os.environ.get("MESSY_TEXT_MAX_INPUT_CHARS")
 
-_groq_client: Groq | None = None
+    if raw_threshold is None:
+        low_confidence_threshold = LOW_CONFIDENCE_THRESHOLD
+    else:
+        try:
+            low_confidence_threshold = float(raw_threshold)
+        except ValueError as exc:
+            raise ConfigurationError(
+                "MESSY_TEXT_CONFIDENCE_THRESHOLD must be a float."
+            ) from exc
 
+    if raw_max_input_chars is None:
+        max_input_chars = MAX_INPUT_CHARS
+    else:
+        try:
+            max_input_chars = int(raw_max_input_chars)
+        except ValueError as exc:
+            raise ConfigurationError(
+                "MESSY_TEXT_MAX_INPUT_CHARS must be an integer."
+            ) from exc
 
-def _get_groq_client() -> Groq:
-    """Lazy-initialize the Groq client."""
-    global _groq_client
-    if _groq_client is None:
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "GROQ_API_KEY environment variable is not set. "
-                "Set it to use LLM classification: export GROQ_API_KEY=gsk_..."
-            )
-        _groq_client = Groq(api_key=api_key)
-    return _groq_client
-
-
-def _llm_classify(text: str) -> ClassificationResult:
-    """Send text to Groq's llama-4-scout for classification.
-
-    Uses response_format={"type": "json_object"} to guarantee
-    valid JSON output from the model. Catches API and parsing errors
-    to ensure pipeline reliability.
-    """
-    try:
-        client = _get_groq_client()
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=256,
-        )
-
-        raw = response.choices[0].message.content
-        data = json.loads(raw)
-
-        return ClassificationResult(
-            reasoning=data.get("reasoning", "LLM reasoning missing."),
-            stage=ProductionStage(data.get("stage", "UNCLASSIFIABLE")),
-            confidence=float(data.get("confidence", 0.0)),
-        )
-
-    except Exception as e:
-        # Catch network timeouts, rate limits, or JSON parsing errors
-        return ClassificationResult(
-            reasoning=f"System fallback due to LLM failure: {str(e)}",
-            stage=ProductionStage.UNCLASSIFIABLE,
-            confidence=0.0,
-        )
+    return ClassifierConfig(
+        low_confidence_threshold=low_confidence_threshold,
+        max_input_chars=max_input_chars,
+    )
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def classify(text: str) -> ClassificationResult:
-    """Classify messy text into a production stage.
-
-    Pipeline:
-    1. Empty check → UNCLASSIFIABLE.
-    2. Fast regex router → instant result for obvious phrases.
-    3. LLM fallback → Groq llama-4-scout for everything else.
-    """
+def classify(
+    text: str,
+    *,
+    llm_classifier: LLMClassifier | None = None,
+    config: ClassifierConfig | None = None,
+) -> ClassificationResult:
+    """Classify messy text into a production stage."""
     if not text or not text.strip():
         return ClassificationResult(
             reasoning="The input text is empty. No classification is possible.",
@@ -179,12 +176,29 @@ def classify(text: str) -> ClassificationResult:
             confidence=1.0,
         )
 
+    classifier_config = config or ClassifierConfig()
     normalized = text.strip()
+    if len(normalized) > classifier_config.max_input_chars:
+        raise InputValidationError(
+            "Input too long "
+            f"({len(normalized)} chars). Maximum is {classifier_config.max_input_chars}."
+        )
 
-    # Step 1: Try fast regex router
     fast_result = _fast_regex_router(normalized)
     if fast_result is not None:
         return fast_result
 
-    # Step 2: LLM classification
-    return _llm_classify(normalized)
+    if llm_classifier is None:
+        raise ConfigurationError(
+            "LLM classifier is not configured for ambiguous text."
+        )
+
+    result = llm_classifier(normalized)
+    if result.confidence < classifier_config.low_confidence_threshold:
+        return ClassificationResult(
+            reasoning=f"Low confidence: {result.reasoning}",
+            stage=ProductionStage.UNCLASSIFIABLE,
+            confidence=result.confidence,
+        )
+
+    return result

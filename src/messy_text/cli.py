@@ -2,78 +2,174 @@
 
 from __future__ import annotations
 
+import os
 import json
 import sys
+from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 
-from messy_text.classifier import classify
+from dotenv import find_dotenv, load_dotenv
+
+from messy_text.classifier import (
+    ClassifierConfig,
+    LLMClassifier,
+    classify,
+    load_classifier_config_from_env,
+)
+from messy_text.errors import StageClassifierOperationalError
+from messy_text.providers import GroqLLMClassifier
 
 
-def main() -> None:
-    """Run the classifier on stdin or a provided argument.
+def main() -> int:
+    """Run the classifier on stdin or a provided argument."""
+    try:
+        llm_classifier = _build_llm_classifier()
+        classifier_config = load_classifier_config_from_env()
+    except StageClassifierOperationalError as exc:
+        print(json.dumps(exc.to_dict()))
+        return 1
 
-    Usage:
-        messy-text "Some text about a film project..."
-        echo "Some text" | messy-text
-        messy-text --batch input.jsonl > output.jsonl
-    """
-    # Batch mode: process JSONL (one JSON object per line with a "text" key)
     if len(sys.argv) > 1 and sys.argv[1] == "--batch":
         if len(sys.argv) < 3:
             print("Usage: messy-text --batch <input.jsonl>", file=sys.stderr)
-            sys.exit(1)
-        _run_batch(sys.argv[2])
-        return
+            return 1
+        return _run_batch(sys.argv[2], llm_classifier, classifier_config)
 
-    # Single text from argument
     if len(sys.argv) > 1:
-        text = " ".join(sys.argv[1:])
-        result = classify(text)
-        print(result.to_json())
-        return
+        return _run_single(" ".join(sys.argv[1:]), llm_classifier, classifier_config)
 
-    # Read from stdin
     if not sys.stdin.isatty():
         text = sys.stdin.read().strip()
-        if text:
-            result = classify(text)
-            print(result.to_json())
-            return
+        if not text:
+            return 0
+        return _run_single(text, llm_classifier, classifier_config)
 
-    # Interactive mode
-    print("messy-text classifier — enter text to classify (Ctrl+C to exit):", file=sys.stderr)
+    return _run_interactive(llm_classifier, classifier_config)
+
+
+def _build_llm_classifier() -> GroqLLMClassifier:
+    load_dotenv(find_dotenv(usecwd=True))
+    return GroqLLMClassifier()
+
+
+def _run_single(
+    text: str,
+    llm_classifier: LLMClassifier,
+    classifier_config: ClassifierConfig,
+) -> int:
+    try:
+        result = classify(
+            text,
+            llm_classifier=llm_classifier,
+            config=classifier_config,
+        )
+    except StageClassifierOperationalError as exc:
+        print(json.dumps(exc.to_dict()))
+        return 1
+
+    print(result.to_json())
+    return 0
+
+
+def _run_interactive(
+    llm_classifier: LLMClassifier,
+    classifier_config: ClassifierConfig,
+) -> int:
+    print("messy-text classifier - enter text to classify (Ctrl+C to exit):", file=sys.stderr)
+    had_errors = False
+
     try:
         while True:
             print("\n> ", end="", file=sys.stderr, flush=True)
             line = input()
-            if line.strip():
-                result = classify(line)
-                print(result.to_json())
+            if not line.strip():
+                continue
+            status = _run_single(line, llm_classifier, classifier_config)
+            had_errors = had_errors or status != 0
     except (KeyboardInterrupt, EOFError):
         print("\nBye!", file=sys.stderr)
 
+    return 1 if had_errors else 0
 
-def _run_batch(filepath: str) -> None:
-    """Process a JSONL file, classifying each line."""
-    with open(filepath, encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-                text = record.get("text", "")
-            except json.JSONDecodeError:
-                # Treat the line itself as raw text
-                text = line
 
-            result = classify(text)
-            output = {
-                "line": line_num,
-                "input": text[:100],
-                **json.loads(result.to_json()),
-            }
+def _run_batch(
+    filepath: str,
+    llm_classifier: LLMClassifier,
+    classifier_config: ClassifierConfig,
+) -> int:
+    had_errors = False
+    max_workers = int(os.environ.get("MESSY_TEXT_BATCH_WORKERS", "4"))
+    with open(filepath, encoding="utf-8") as handle, ThreadPoolExecutor(
+        max_workers=max_workers
+    ) as executor:
+        # GroqLLMClassifier is stateless after __post_init__; sharing across threads is safe.
+        for output, has_error in executor.map(
+            lambda entry: _classify_batch_entry(
+                entry,
+                llm_classifier,
+                classifier_config,
+            ),
+            _iter_batch_entries(handle),
+        ):
+            had_errors = had_errors or has_error
             print(json.dumps(output))
+
+    return 1 if had_errors else 0
+
+
+def _extract_text(line: str) -> str:
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return line
+
+    if isinstance(record, dict):
+        value = record.get("text", "")
+        return value if isinstance(value, str) else str(value)
+
+    return line
+
+
+def _iter_batch_entries(handle: Iterable[str]) -> Iterator[tuple[int, str]]:
+    for line_num, raw_line in enumerate(handle, 1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        yield (line_num, _extract_text(line))
+
+
+def _classify_batch_entry(
+    entry: tuple[int, str],
+    llm_classifier: LLMClassifier,
+    classifier_config: ClassifierConfig,
+) -> tuple[dict[str, object], bool]:
+    line_num, text = entry
+    try:
+        result = classify(
+            text,
+            llm_classifier=llm_classifier,
+            config=classifier_config,
+        )
+    except StageClassifierOperationalError as exc:
+        return (
+            {
+                "line": line_num,
+                "input": text,
+                **exc.to_dict(),
+            },
+            True,
+        )
+
+    return (
+        {
+            "line": line_num,
+            "input": text,
+            **result.model_dump(mode="json"),
+        },
+        False,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

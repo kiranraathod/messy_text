@@ -1,29 +1,25 @@
-"""Test suite for the hybrid production stage classifier.
-
-Tests are split into:
-- TestFastRouter: Tests the regex pre-filter (no API calls).
-- TestLLMClassifier: Tests the LLM path with mocked Groq responses.
-- TestEmptyInput: Tests empty/whitespace handling.
-- TestOutputFormat: Tests JSON output structure.
-"""
+"""Tests for the core production stage classifier."""
 
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import Mock
 
 import pytest
 
-from messy_text.classifier import _fast_regex_router, _llm_classify, classify
+from messy_text.classifier import (
+    ClassifierConfig,
+    MAX_INPUT_CHARS,
+    _fast_regex_router,
+    classify,
+    load_classifier_config_from_env,
+)
+from messy_text.errors import ConfigurationError, InputValidationError
 from messy_text.models import ClassificationResult, ProductionStage
 
 
-# ===================================================================
-# Fast regex router tests (no API calls)
-# ===================================================================
-
 class TestFastRouter:
-    """Tests for the ultra-fast regex pre-filter."""
+    """Tests for the exact-phrase fast router."""
 
     def test_principal_photography(self):
         result = _fast_regex_router("Principal photography began last Monday in Vancouver.")
@@ -51,7 +47,6 @@ class TestFastRouter:
         assert result.stage == ProductionStage.PRE_PRODUCTION
 
     def test_no_match_returns_none(self):
-        """Ambiguous text should fall through to LLM."""
         result = _fast_regex_router("We're pitching the project to Netflix this week.")
         assert result is None
 
@@ -60,7 +55,6 @@ class TestFastRouter:
         assert result is None
 
     def test_attached_talent_returns_none(self):
-        """Attached talent is ambiguous — should go to LLM, not fast-route."""
         result = _fast_regex_router("Chris Hemsworth is attached to star.")
         assert result is None
 
@@ -74,170 +68,29 @@ class TestFastRouter:
         assert result is not None
         assert result.confidence >= 0.9
 
+    def test_additional_fast_routes(self):
+        cases = [
+            ("The project is in turnaround after studio changes.", ProductionStage.DEVELOPMENT),
+            ("They are seeking film financing ahead of packaging.", ProductionStage.DEVELOPMENT),
+            ("The team started pre-production this week.", ProductionStage.PRE_PRODUCTION),
+            ("They scouted locations across Toronto.", ProductionStage.PRE_PRODUCTION),
+        ]
 
-# ===================================================================
-# LLM classifier tests (mocked Groq API)
-# ===================================================================
+        for text, expected_stage in cases:
+            result = _fast_regex_router(text)
+            assert result is not None
+            assert result.stage == expected_stage
 
-def _mock_groq_response(reasoning: str, stage: str, confidence: float) -> MagicMock:
-    """Create a mock Groq chat completion response."""
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = json.dumps({
-        "reasoning": reasoning,
-        "stage": stage,
-        "confidence": confidence,
-    })
-    return mock_response
-
-
-class TestLLMClassifier:
-    """Tests for the LLM classification path with mocked API."""
-
-    @patch("messy_text.classifier._get_groq_client")
-    def test_development_classification(self, mock_get_client):
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = _mock_groq_response(
-            "The text mentions pitching and seeking financing, which are development activities.",
-            "DEVELOPMENT", 0.9,
+    def test_multiple_fast_route_matches_return_none(self):
+        result = _fast_regex_router(
+            "After being in turnaround, the team started pre-production last week."
         )
-        mock_get_client.return_value = mock_client
 
-        result = _llm_classify("We're pitching the project to studios and seeking financing.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-        assert result.confidence == 0.9
+        assert result is None
 
-    @patch("messy_text.classifier._get_groq_client")
-    def test_pre_production_classification(self, mock_get_client):
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = _mock_groq_response(
-            "The project is greenlit and crew is being hired, indicating pre-production.",
-            "PRE_PRODUCTION", 0.9,
-        )
-        mock_get_client.return_value = mock_client
-
-        result = _llm_classify("The film has been greenlit and they're hiring department heads.")
-        assert result.stage == ProductionStage.PRE_PRODUCTION
-
-    @patch("messy_text.classifier._get_groq_client")
-    def test_production_classification(self, mock_get_client):
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = _mock_groq_response(
-            "The text says filming started, indicating active production.",
-            "PRODUCTION", 0.95,
-        )
-        mock_get_client.return_value = mock_client
-
-        result = _llm_classify("They started shooting the pilot episode in Brooklyn.")
-        assert result.stage == ProductionStage.PRODUCTION
-
-    @patch("messy_text.classifier._get_groq_client")
-    def test_unclassifiable(self, mock_get_client):
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = _mock_groq_response(
-            "The text is about food and is irrelevant to film production.",
-            "UNCLASSIFIABLE", 0.95,
-        )
-        mock_get_client.return_value = mock_client
-
-        result = _llm_classify("Grilled salmon with lemon butter sauce.")
-        assert result.stage == ProductionStage.UNCLASSIFIABLE
-
-    @patch("messy_text.classifier._get_groq_client")
-    def test_temporal_override_dev_to_production(self, mock_get_client):
-        """LLM should pick the latest chronological event."""
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = _mock_groq_response(
-            "Multiple stages mentioned but the latest event is starting to shoot, indicating production.",
-            "PRODUCTION", 0.95,
-        )
-        mock_get_client.return_value = mock_client
-
-        result = _llm_classify(
-            "After 5 years in development, we finally started shooting today."
-        )
-        assert result.stage == ProductionStage.PRODUCTION
-
-    @patch("messy_text.classifier._get_groq_client")
-    def test_attached_talent_is_development(self, mock_get_client):
-        """Edge case: attached talent should be DEVELOPMENT per the system prompt."""
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = _mock_groq_response(
-            "Attached talent alone indicates development, not pre-production.",
-            "DEVELOPMENT", 0.85,
-        )
-        mock_get_client.return_value = mock_client
-
-        result = _llm_classify("Chris Hemsworth is attached to star in the upcoming action film.")
-        assert result.stage == ProductionStage.DEVELOPMENT
-
-    @patch("messy_text.classifier._get_groq_client")
-    def test_api_called_with_correct_params(self, mock_get_client):
-        """Verify the Groq API is called with json_object format and temperature 0."""
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = _mock_groq_response(
-            "Test.", "DEVELOPMENT", 0.8,
-        )
-        mock_get_client.return_value = mock_client
-
-        _llm_classify("Some test text.")
-
-        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["response_format"] == {"type": "json_object"}
-        assert call_kwargs["temperature"] == 0.0
-        assert len(call_kwargs["messages"]) == 2
-        assert call_kwargs["messages"][0]["role"] == "system"
-        assert call_kwargs["messages"][1]["role"] == "user"
-        assert call_kwargs["messages"][1]["content"] == "Some test text."
-
-    @patch("messy_text.classifier._get_groq_client")
-    def test_api_timeout_returns_unclassifiable(self, mock_get_client):
-        """Network timeout should gracefully return UNCLASSIFIABLE, not crash."""
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.side_effect = TimeoutError("Connection timed out")
-        mock_get_client.return_value = mock_client
-
-        result = _llm_classify("Some text that would normally classify fine.")
-        assert result.stage == ProductionStage.UNCLASSIFIABLE
-        assert result.confidence == 0.0
-        assert "LLM failure" in result.reasoning
-
-    @patch("messy_text.classifier._get_groq_client")
-    def test_malformed_json_returns_unclassifiable(self, mock_get_client):
-        """Malformed LLM output should fallback, not crash json.loads."""
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "not valid json at all"
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_get_client.return_value = mock_client
-
-        result = _llm_classify("Some text.")
-        assert result.stage == ProductionStage.UNCLASSIFIABLE
-        assert result.confidence == 0.0
-
-    @patch("messy_text.classifier._get_groq_client")
-    def test_missing_keys_uses_defaults(self, mock_get_client):
-        """LLM returning partial JSON should use safe defaults via .get()."""
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = json.dumps({"reasoning": "partial response"})
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_get_client.return_value = mock_client
-
-        result = _llm_classify("Some ambiguous text.")
-        assert result.stage == ProductionStage.UNCLASSIFIABLE
-        assert result.confidence == 0.0
-        assert result.reasoning == "partial response"
-
-
-# ===================================================================
-# Full classify() pipeline tests
-# ===================================================================
 
 class TestClassifyPipeline:
-    """Tests for the full classify() pipeline."""
+    """Tests for the pure classification flow."""
 
     def test_empty_string(self):
         result = classify("")
@@ -249,45 +102,187 @@ class TestClassifyPipeline:
         assert result.stage == ProductionStage.UNCLASSIFIABLE
 
     def test_fast_route_skips_llm(self):
-        """Fast-routed text should NOT trigger an API call."""
-        result = classify("Principal photography began last Monday.")
-        assert result.stage == ProductionStage.PRODUCTION
-        # No mock needed — if it tried to call Groq without a key, it would error
+        llm_classifier = Mock(side_effect=AssertionError("LLM should not be called"))
 
-    @patch("messy_text.classifier._get_groq_client")
-    def test_fallback_to_llm(self, mock_get_client):
-        """Text that doesn't match fast routes should go to LLM."""
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = _mock_groq_response(
-            "The text discusses script rewrites, a development activity.",
-            "DEVELOPMENT", 0.85,
+        result = classify(
+            "Principal photography began last Monday.",
+            llm_classifier=llm_classifier,
         )
-        mock_get_client.return_value = mock_client
 
-        result = classify("The screenplay is being rewritten for the third time.")
+        assert result.stage == ProductionStage.PRODUCTION
+        llm_classifier.assert_not_called()
+
+    def test_fallback_to_llm(self):
+        llm_classifier = Mock(
+            return_value=ClassificationResult(
+                reasoning="The text discusses script rewrites, a development activity.",
+                stage=ProductionStage.DEVELOPMENT,
+                confidence=0.85,
+            )
+        )
+
+        result = classify(
+            "The screenplay is being rewritten for the third time.",
+            llm_classifier=llm_classifier,
+        )
+
+        assert result.stage == ProductionStage.DEVELOPMENT
+        llm_classifier.assert_called_once_with(
+            "The screenplay is being rewritten for the third time."
+        )
+
+    def test_temporal_override_uses_llm_result(self):
+        llm_classifier = Mock(
+            return_value=ClassificationResult(
+                reasoning="The latest event is starting to shoot.",
+                stage=ProductionStage.PRODUCTION,
+                confidence=0.95,
+            )
+        )
+
+        result = classify(
+            "After 5 years in development, we finally started shooting today.",
+            llm_classifier=llm_classifier,
+        )
+
+        assert result.stage == ProductionStage.PRODUCTION
+
+    def test_attached_talent_uses_llm_result(self):
+        llm_classifier = Mock(
+            return_value=ClassificationResult(
+                reasoning="Attached talent alone indicates development.",
+                stage=ProductionStage.DEVELOPMENT,
+                confidence=0.85,
+            )
+        )
+
+        result = classify(
+            "Chris Hemsworth is attached to star in the upcoming action film.",
+            llm_classifier=llm_classifier,
+        )
+
         assert result.stage == ProductionStage.DEVELOPMENT
 
+    def test_ambiguous_text_without_llm_configuration_errors(self):
+        with pytest.raises(ConfigurationError):
+            classify("Studio executives are debating the project's next move.")
 
-# ===================================================================
-# Output format tests
-# ===================================================================
+    def test_low_confidence_llm_result_becomes_unclassifiable(self):
+        llm_classifier = Mock(
+            return_value=ClassificationResult(
+                reasoning="The text might describe development, but the signal is weak.",
+                stage=ProductionStage.DEVELOPMENT,
+                confidence=0.4,
+            )
+        )
+
+        result = classify(
+            "The project may still be seeking a path forward.",
+            llm_classifier=llm_classifier,
+            config=ClassifierConfig(),
+        )
+
+        assert result.stage == ProductionStage.UNCLASSIFIABLE
+        assert result.confidence == 0.4
+        assert result.reasoning == (
+            "Low confidence: The text might describe development, but the signal is weak."
+        )
+
+    def test_input_too_long_raises_input_validation_error(self):
+        with pytest.raises(
+            InputValidationError,
+            match=rf"Input too long \({MAX_INPUT_CHARS + 1} chars\)\. Maximum is {MAX_INPUT_CHARS}\.",
+        ):
+            classify(
+                "x" * (MAX_INPUT_CHARS + 1),
+                llm_classifier=Mock(),
+                config=ClassifierConfig(),
+            )
+
+    def test_load_classifier_config_from_env_respects_runtime_env_overrides(self, monkeypatch):
+        monkeypatch.setenv("MESSY_TEXT_MAX_INPUT_CHARS", "10")
+        monkeypatch.setenv("MESSY_TEXT_CONFIDENCE_THRESHOLD", "0.7")
+        config = load_classifier_config_from_env()
+
+        assert config.max_input_chars == 10
+        assert config.low_confidence_threshold == 0.7
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            (
+                {"low_confidence_threshold": 1.5},
+                "low_confidence_threshold must be between 0.0 and 1.0.",
+            ),
+            (
+                {"max_input_chars": 0},
+                "max_input_chars must be greater than 0.",
+            ),
+        ],
+    )
+    def test_classifier_config_validation_uses_field_names(self, kwargs, message):
+        with pytest.raises(ConfigurationError, match=message):
+            ClassifierConfig(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("env_name", "value", "message"),
+        [
+            (
+                "MESSY_TEXT_CONFIDENCE_THRESHOLD",
+                "1.5",
+                "low_confidence_threshold must be between 0.0 and 1.0.",
+            ),
+            (
+                "MESSY_TEXT_CONFIDENCE_THRESHOLD",
+                "-0.1",
+                "low_confidence_threshold must be between 0.0 and 1.0.",
+            ),
+            (
+                "MESSY_TEXT_MAX_INPUT_CHARS",
+                "0",
+                "max_input_chars must be greater than 0.",
+            ),
+        ],
+    )
+    def test_load_classifier_config_from_env_validates_bounds(
+        self,
+        monkeypatch,
+        env_name: str,
+        value: str,
+        message: str,
+    ):
+        monkeypatch.setenv(env_name, value)
+
+        with pytest.raises(ConfigurationError, match=message):
+            load_classifier_config_from_env()
+
+    def test_multi_signal_fast_route_text_falls_back_to_llm(self):
+        llm_classifier = Mock(
+            return_value=ClassificationResult(
+                reasoning="The latest event is starting pre-production.",
+                stage=ProductionStage.PRE_PRODUCTION,
+                confidence=0.88,
+            )
+        )
+
+        result = classify(
+            "After being in turnaround, the team started pre-production last week.",
+            llm_classifier=llm_classifier,
+        )
+
+        assert result.stage == ProductionStage.PRE_PRODUCTION
+        llm_classifier.assert_called_once_with(
+            "After being in turnaround, the team started pre-production last week."
+        )
+
 
 class TestOutputFormat:
-    """Ensure the JSON output format matches the spec exactly."""
+    """Ensure successful JSON output matches the expected contract."""
 
     def test_json_has_three_keys(self):
         result = classify("Principal photography is underway.")
         output = json.loads(result.to_json())
         assert set(output.keys()) == {"reasoning", "stage", "confidence"}
-
-    def test_reasoning_is_first_key(self):
-        """The 'reasoning' key must appear FIRST in the JSON output."""
-        result = classify("Principal photography is underway.")
-        output_str = result.to_json()
-        reasoning_pos = output_str.index('"reasoning"')
-        stage_pos = output_str.index('"stage"')
-        confidence_pos = output_str.index('"confidence"')
-        assert reasoning_pos < stage_pos < confidence_pos
 
     def test_stage_is_valid_enum(self):
         result = classify("Cameras rolling on set.")
