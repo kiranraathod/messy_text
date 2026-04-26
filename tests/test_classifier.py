@@ -233,3 +233,42 @@ def test_cli_exception_handling(monkeypatch, capsys, mocker):
     output_json = json.loads(captured.out)
     assert output_json["error"] == "Simulated missing API key failure"
     assert output_json["error_type"] == "valueerror"  # The specific exception type
+
+
+@pytest.mark.parametrize("text, expected_stage, expected_conf", [
+    # DEVELOPMENT
+    ("Still in dev hell, script rewrites ongoing, trying to attach director.", 
+     ProductionStage.DEVELOPMENT, 0.82),
+    
+    # PRE_PRODUCTION
+    ("Greenlit last week! Hired the DP, scouting locations in Atlanta next month. Shoot starts in 6 weeks.", 
+     ProductionStage.PRE_PRODUCTION, 0.95),
+    
+    # PRODUCTION (messy real-world style)
+    ("Day 12 principal photography. Cameras rolling on set in Toronto. Call sheet attached. #OnSet", 
+     ProductionStage.PRODUCTION, 0.98),
+    
+    # UNCLASSIFIABLE
+    ("Post-production wrapping up, VFX shots look great. Trailer drops next week!", 
+     ProductionStage.UNCLASSIFIABLE, 0.92),
+    
+    # Ambiguous / shorthand
+    ("PP almost done, locs locked, talent attached, green light finally came through.", 
+     ProductionStage.PRE_PRODUCTION, 0.88),   # latest stage wins
+    
+    # Super messy
+    ("cameras up rn day 3, crew exhausted but we got the shot lol call sheet 4 tmrw", 
+     ProductionStage.PRODUCTION, 0.96),
+])
+def test_classify_various_real_world_texts(mock_env, mock_groq, text, expected_stage, expected_conf):
+    # Different mock response per test case
+    mock_groq.return_value.choices[0].message.content = json.dumps({
+        "reasoning": "Test reasoning based on input keywords.",
+        "stage": expected_stage.value,
+        "confidence": expected_conf
+    })
+
+    result = classify(text)
+    assert result.stage == expected_stage
+    assert result.confidence == expected_conf
+    assert result.reliable == (expected_conf >= 0.85)
