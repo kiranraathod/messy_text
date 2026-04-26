@@ -54,7 +54,7 @@ Every response returns four fields:
 
 > You may use LLMs. Keep it simple. Avoid unnecessary complexity.
 
-The system is four files, zero unnecessary abstractions.
+The system is focused strictly on the core logic, zero unnecessary abstractions.
 
 ```
 messy_text/
@@ -62,6 +62,9 @@ messy_text/
 ├── __main__.py       # CLI — stdin or argument, prints JSON, exits 0 or 1
 ├── classifier.py     # classify() — prompt, Groq call, validation, reliable gate
 └── models.py         # ClassificationResult + ProductionStage Pydantic schema
+tests/
+├── test_classifier.py  # comprehensive unit tests (API mocked)
+└── live_test.py        # live batch classification test (real Groq API)
 ```
 
 ---
@@ -221,6 +224,18 @@ echo "Scr1pt still bein re-written lol. financng talks r ongoing w/ 3 diff studi
   "confidence": 0.88,
   "reliable": true
 }
+```
+
+### Running Tests
+
+The system includes a comprehensive `pytest` suite covering input validation, edge cases, schema validation, API resilience, and the CLI wrapper. 
+
+```bash
+# Run the mocked unit test suite
+uv run pytest
+
+# Run a batch of real-world messy text against the live API
+uv run pytest tests/live_test.py -s
 ```
 
 ### Confidence Interpretation
