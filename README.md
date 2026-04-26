@@ -244,6 +244,4 @@ All configuration is via environment variables. Copy `.env.template` to `.env` t
 
 ---
 
-## Next Step
 
-Live review and system challenge discussion.
