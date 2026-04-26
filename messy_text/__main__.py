@@ -24,7 +24,8 @@ def main() -> int:
         print(result.model_dump_json(indent=2))
         return 0
     except Exception as exc:  # keep one broad catch for CLI
-        print(json.dumps({"error": str(exc), "error_type": "operational_error"}))
+        error_type = type(exc).__name__.lower()
+        print(json.dumps({"error": str(exc), "error_type": error_type}))
         return 1
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from messy_text.models import ClassificationResult, ProductionStage
 SYSTEM_PROMPT = """
 You are an expert film and television production coordinator. Your sole job is to analyze messy, unstructured production text (emails, Slack messages, notes, call sheets, updates, etc.) and classify it into exactly one production stage.
 
-Return ONLY a valid JSON object with these exact keys (no extra text, no markdown):
+Return ONLY a valid JSON object with these exact keys (no extra text, no markdown, no additional fields, no "reliable" key):
 - reasoning: string - one short, concrete sentence (max 2 sentences) that references specific phrases or details directly from the input text. Never invent facts or use external knowledge.
 - stage: string - exactly one of: "DEVELOPMENT", "PRE_PRODUCTION", "PRODUCTION", "UNCLASSIFIABLE"
 - confidence: float - a number between 0.0 and 1.0
@@ -54,6 +54,9 @@ Output: {"reasoning": "Script polishing suggests DEVELOPMENT, but no corroborati
 
 Input: "Post-production wrapping up, VFX shots look great."
 Output: {"reasoning": "Post-production content has no match in the defined stages.", "stage": "UNCLASSIFIABLE", "confidence": 0.92}
+
+Input: "After six months in dev hell we finally got the green light and start scouting next week."
+Output: {"reasoning": "Moved past development hell into green light + scouting = latest stage is PRE_PRODUCTION.", "stage": "PRE_PRODUCTION", "confidence": 0.92}
 
 Now classify the user's text following the rules above.
 """.strip()

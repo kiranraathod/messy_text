@@ -113,7 +113,7 @@ analyze messy, unstructured production text and classify it into exactly one sta
 <0.5  genuinely ambiguous or conflicting signals
 ```
 
-**7 few-shot examples** covering every stage and edge case: vague text, talent attachment, greenlit-and-scouting, active shoot, theatrical release, and post-production.
+**8 few-shot examples** covering every stage and edge case: vague text, talent attachment, greenlit-and-scouting, active shoot, theatrical release, post-production, **and multi-stage transition** (dev hell → greenlit + scouting).
 
 ---
 

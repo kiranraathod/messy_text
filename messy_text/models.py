@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class ProductionStage(str, Enum):
@@ -34,3 +34,5 @@ class ClassificationResult(BaseModel):
         default=False,
         description="True if confidence >= 0.85 (strong signal), False otherwise.",
     )
+
+    model_config = ConfigDict(extra="forbid")  # ← NEW: prevents extra fields from LLM
