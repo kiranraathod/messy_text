@@ -30,3 +30,7 @@ class ClassificationResult(BaseModel):
         le=1.0,
         description="Confidence score between 0.0 and 1.0.",
     )
+    reliable: bool = Field(
+        default=False,
+        description="True if confidence >= 0.85 (strong signal), False otherwise.",
+    )
